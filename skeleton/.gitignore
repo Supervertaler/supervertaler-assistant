@@ -1,0 +1,58 @@
+# Supervertaler Assistant memory bank – .gitignore
+# Ship the skeleton (folders, _EXAMPLE_* files, templates).
+# Keep all real user data out of version control.
+
+# ── Obsidian internals ──────────────────────────────────
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/graph.json
+.obsidian/cache/
+
+# ── User data: everything that is NOT an example or template ──
+# Each content folder: ignore all .md files EXCEPT _EXAMPLE_* ones
+00_INBOX/*.md
+!00_INBOX/_EXAMPLE_*.md
+00_INBOX/_archive/
+
+01_CLIENTS/*.md
+01_CLIENTS/**/*.md
+!01_CLIENTS/_EXAMPLE_*.md
+
+02_TERMINOLOGY/*.md
+02_TERMINOLOGY/**/*.md
+!02_TERMINOLOGY/_EXAMPLE_*.md
+
+03_DOMAINS/*.md
+03_DOMAINS/**/*.md
+!03_DOMAINS/_EXAMPLE_*.md
+
+04_STYLE/*.md
+04_STYLE/**/*.md
+!04_STYLE/_EXAMPLE_*.md
+
+05_INDICES/*.md
+05_INDICES/**/*.md
+!05_INDICES/_EXAMPLE_*.md
+
+# Templates are always shipped — do NOT ignore 06_TEMPLATES/
+
+# ── Common sensitive / binary files ─────────────────────
+*.pdf
+*.docx
+*.xlsx
+*.xliff
+*.sdlxliff
+*.sdlppx
+*.sdlrpx
+*.mqxliff
+*.tmx
+*.tbx
+*.sdltb
+*.zip
+*.7z
+*.tar.gz
+
+# ── OS junk ─────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store

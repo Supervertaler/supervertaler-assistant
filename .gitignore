@@ -55,7 +55,7 @@ coverage.xml
 .DS_Store
 Thumbs.db
 
-# Local user data / config — never commit real vaults or API keys
+# Local user data / config – never commit real memory banks or API keys
 settings.json
 *.sqlite
 *.sqlite3

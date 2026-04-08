@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "supermemory"
+name = "supervertaler-assistant"
 version = "0.1.0"
-description = "A self-organising, LLM-maintained translation knowledge base — standalone cross-platform client"
+description = "Supervertaler Assistant – a cross-platform AI assistant for professional translators, with a memory bank of clients, terminology, domains and style"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -14,11 +14,13 @@ authors = [
 ]
 keywords = [
     "translation",
+    "memory-bank",
     "knowledge-base",
     "obsidian",
     "llm",
     "terminology",
     "supervertaler",
+    "assistant",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -59,19 +61,18 @@ distill = [
 ]
 
 [project.scripts]
-supermemory = "supermemory.ui.main_window:main"
+supervertaler-assistant = "supervertaler_assistant.ui.main_window:main"
 
 [project.urls]
-Homepage = "https://github.com/Supervertaler/SuperMemory"
-Issues = "https://github.com/Supervertaler/SuperMemory/issues"
-"Vault skeleton" = "https://github.com/Supervertaler/Supervertaler-SuperMemory"
+Homepage = "https://github.com/Supervertaler/supervertaler-assistant"
+Issues = "https://github.com/Supervertaler/supervertaler-assistant/issues"
 Supervertaler = "https://supervertaler.com"
 
 [tool.setuptools.packages.find]
-include = ["supermemory*"]
+include = ["supervertaler_assistant*"]
 
 [tool.setuptools.package-data]
-supermemory = ["templates/*.md"]
+supervertaler_assistant = ["templates/*.md"]
 
 [tool.ruff]
 line-length = 100
