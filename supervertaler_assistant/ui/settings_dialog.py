@@ -2,7 +2,7 @@
 supervertaler_assistant.ui.settings_dialog
 ==========================================
 
-Settings dialog – memory bank path, LLM provider/model/key, context hints.
+Settings dialog – memory banks root, LLM provider/model/key, context hints.
 
 Kept deliberately simple: one modal dialog with a vertical form layout.
 No tabs, no tree. Users should be able to read the whole thing at a
@@ -10,6 +10,10 @@ glance and close it in three clicks.
 
 The dialog edits a *copy* of :class:`AppSettings`; the main window
 decides whether to accept or discard the result.
+
+Step 2 of the multi-memory-bank rollout only swaps the single-bank path
+field for a multi-bank *root* field; Step 3 will layer an in-dialog
+bank list + create/rename/delete controls on top.
 """
 
 from __future__ import annotations
@@ -79,17 +83,24 @@ class SettingsDialog(QDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         outer.addLayout(form)
 
-        # Memory bank ───────────────────────────────────────────────────
+        # Memory banks root ─────────────────────────────────────────────
         mb_row = QWidget()
         mb_layout = QHBoxLayout(mb_row)
         mb_layout.setContentsMargins(0, 0, 0, 0)
-        self.txt_memory_bank = QLineEdit()
-        self.txt_memory_bank.setPlaceholderText("Path to your memory bank")
+        self.txt_memory_banks_root = QLineEdit()
+        self.txt_memory_banks_root.setPlaceholderText(
+            "Parent folder that holds all your memory banks"
+        )
+        self.txt_memory_banks_root.setToolTip(
+            "A single folder (e.g. ~/Supervertaler/memory-banks/) whose\n"
+            "subfolders are individual memory banks. The toolbar dropdown\n"
+            "lets you switch between them on the fly."
+        )
         btn_browse = QPushButton("Browse…")
-        btn_browse.clicked.connect(self._browse_memory_bank)
-        mb_layout.addWidget(self.txt_memory_bank, stretch=1)
+        btn_browse.clicked.connect(self._browse_memory_banks_root)
+        mb_layout.addWidget(self.txt_memory_banks_root, stretch=1)
         mb_layout.addWidget(btn_browse)
-        form.addRow("Memory bank folder:", mb_row)
+        form.addRow("Memory banks root:", mb_row)
 
         # LLM ───────────────────────────────────────────────────────────
         self.cmb_model = QComboBox()
@@ -168,13 +179,13 @@ class SettingsDialog(QDialog):
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
-    def _browse_memory_bank(self) -> None:
-        start_dir = self.txt_memory_bank.text() or str(Path.home())
+    def _browse_memory_banks_root(self) -> None:
+        start_dir = self.txt_memory_banks_root.text() or str(Path.home())
         picked = QFileDialog.getExistingDirectory(
-            self, "Select memory bank folder", start_dir
+            self, "Select memory banks root folder", start_dir
         )
         if picked:
-            self.txt_memory_bank.setText(picked)
+            self.txt_memory_banks_root.setText(picked)
 
     def _on_model_changed(self, _text: str) -> None:
         self._refresh_status()
@@ -192,7 +203,7 @@ class SettingsDialog(QDialog):
 
     def _load_into_form(self) -> None:
         s = self._settings
-        self.txt_memory_bank.setText(s.memory_bank_dir)
+        self.txt_memory_banks_root.setText(s.memory_banks_root)
         self.cmb_model.setCurrentText(s.llm_model)
         self.txt_api_key.setText(s.llm_api_key)
         self.txt_api_base.setText(s.llm_api_base)
@@ -208,7 +219,7 @@ class SettingsDialog(QDialog):
     def _collect_into_copy(self) -> AppSettings:
         """Read the form into a fresh AppSettings (doesn't mutate self._settings)."""
         copy = deepcopy(self._settings)
-        copy.memory_bank_dir = self.txt_memory_bank.text().strip()
+        copy.memory_banks_root = self.txt_memory_banks_root.text().strip()
         copy.llm_model = self.cmb_model.currentText().strip()
         copy.llm_api_key = self.txt_api_key.text().strip()
         copy.llm_api_base = self.txt_api_base.text().strip()

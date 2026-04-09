@@ -7,7 +7,7 @@ PyQt6 main window for the standalone Supervertaler Assistant app.
 Layout
 ------
     ┌───────────────────────────────────────────────────┐
-    │  Memory bank: C:\\Users\\me\\Supervertaler\\...    │   ← header
+    │  Memory bank: [translation       ▾]  [Open…]      │   ← header
     ├───────────────────────────────────────────────────┤
     │ Memory Bank  [↓ Process Inbox] [✔ Health Check]   │   ← toolbar
     │              [⚗ Distill] [N files in inbox] [↻]   │     (mirrors the
@@ -19,6 +19,13 @@ Layout
     ├───────────────────────────────────────────────────┤
     │  Input box                         [Send]         │
     └───────────────────────────────────────────────────┘
+
+The header combo lists every memory bank found under
+``app_settings.memory_banks_root``. Switching the selection immediately
+swaps the active bank: the reader and the agents are rebuilt against
+the new path, the chat history stays put, and the user's next turn
+reads from the new bank. This matches the Trados plugin's Memory Bank
+toolbar dropdown (see ``docs/design/multi-memory-bank.md``).
 
 All four workflow actions are wired to live agents. Chat messages
 stream into the history area token-by-token, then get re-rendered as
@@ -41,8 +48,10 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -65,9 +74,46 @@ from ..agents import (
     QueryAgent,
 )
 from ..llm import LlmClient, validate_settings
-from ..memory_bank import MemoryBankReader
+from ..memory_bank import MemoryBankInfo, MemoryBankReader, list_memory_banks
 from ..settings import AppSettings, load_settings, save_settings
 from .settings_dialog import SettingsDialog
+
+
+# Sentinel userData for the synthetic "Manage banks…" row at the bottom
+# of the dropdown. Picked as a string unlikely to collide with any real
+# folder name.
+_MANAGE_SENTINEL = "__supervertaler_manage_banks__"
+
+# Default parent folder suggested to a first-time user.
+_DEFAULT_BANKS_ROOT = Path.home() / "Supervertaler" / "memory-banks"
+
+# Legacy single-bank path to migrate on first run if we find it.
+_LEGACY_SINGLE_BANK = Path.home() / "Supervertaler" / "memory-bank"
+
+# Regex that accepts short-identifier bank names: lowercase letters,
+# digits, hyphen, underscore. Applied to the first-run migration name
+# the user supplies so a nice "Main" becomes "main".
+_BANK_NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def _sanitise_bank_name(raw: str) -> str:
+    """Normalise a user-entered bank name into a short filesystem identifier.
+
+    Spec: lowercase letters, digits, hyphen, underscore. Spaces become
+    hyphens. Anything else is dropped. Leading / trailing separators are
+    stripped. Returns an empty string if nothing survives sanitisation,
+    which the caller should treat as a validation error.
+
+    Examples:
+        "Main"           → "main"
+        "My Translation" → "my-translation"
+        "eu procurement" → "eu-procurement"
+        "foo!?bar"       → "foobar"
+        "   "            → ""
+    """
+    lowered = raw.strip().lower().replace(" ", "-")
+    cleaned = "".join(c for c in lowered if c in _BANK_NAME_CHARS)
+    return cleaned.strip("-_")
 
 
 # ─── Chat rendering helpers ────────────────────────────────────────────────
@@ -189,6 +235,7 @@ class MainWindow(QMainWindow):
         )
 
         # Runtime state
+        self.memory_banks_root: Path | None = None
         self.memory_bank_dir: Path | None = None
         self.llm_client: LlmClient | None = None
         self.query_agent: QueryAgent | None = None
@@ -202,11 +249,17 @@ class MainWindow(QMainWindow):
         self._assistant_stream_buffer = ""
         self._assistant_start_pos: int | None = None
 
+        # Re-entrancy guard for the bank combo. Set to True while we
+        # programmatically repopulate the items so ``currentIndexChanged``
+        # doesn't trigger a spurious bank swap.
+        self._suppress_combo_change = False
+
         self._build_ui()
         self._apply_chat_css()
 
-        # Auto-load memory bank from settings, or fall back to default
-        self._try_initial_memory_bank()
+        # Resolve the memory-banks root (with first-run migration if needed),
+        # populate the dropdown, then load the last-active bank.
+        self._try_initial_memory_banks_root()
 
     # ── UI scaffold ─────────────────────────────────────────────────────
 
@@ -219,17 +272,36 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Header: memory bank path
+        # Header: memory bank dropdown (+ reveal-in-Explorer button)
+        #
+        # Replaces the single-bank label + "Choose…" button with a combo
+        # populated from ``list_memory_banks(memory_banks_root)``. The
+        # bottom row of the combo is a synthetic "Manage banks…" entry
+        # (``_MANAGE_SENTINEL``) that opens the settings dialog so the
+        # user can fix the root or create a new bank without leaving the
+        # window. See ``docs/design/multi-memory-bank.md``.
         header = QWidget()
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(8, 4, 8, 4)
         header_layout.addWidget(QLabel("Memory bank:"))
-        self.lbl_memory_bank_path = QLabel("(none)")
-        self.lbl_memory_bank_path.setStyleSheet("color: #888;")
-        header_layout.addWidget(self.lbl_memory_bank_path, stretch=1)
-        btn_pick = QPushButton("Choose memory bank…")
-        btn_pick.clicked.connect(self._pick_memory_bank)
-        header_layout.addWidget(btn_pick)
+
+        self.cmb_memory_bank = QComboBox()
+        self.cmb_memory_bank.setMinimumWidth(220)
+        self.cmb_memory_bank.setToolTip(
+            "Active memory bank. Switching is immediate – the next chat\n"
+            "turn reads from the new bank; chat history is preserved."
+        )
+        self.cmb_memory_bank.currentIndexChanged.connect(self._on_bank_combo_changed)
+        header_layout.addWidget(self.cmb_memory_bank, stretch=1)
+
+        self.btn_open_bank_folder = QPushButton("Open folder")
+        self.btn_open_bank_folder.setToolTip(
+            "Reveal the active memory bank folder in your file manager."
+        )
+        self.btn_open_bank_folder.clicked.connect(self._reveal_active_bank_folder)
+        self.btn_open_bank_folder.setEnabled(False)
+        header_layout.addWidget(self.btn_open_bank_folder)
+
         layout.addWidget(header)
 
         # Toolbar – 4 buttons, mirrors the Trados plugin's Memory Bank toolbar
@@ -297,10 +369,18 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
 
         file_menu = menu_bar.addMenu("&File")
-        act_pick = QAction("&Choose memory bank…", self)
-        act_pick.setShortcut("Ctrl+O")
-        act_pick.triggered.connect(self._pick_memory_bank)
-        file_menu.addAction(act_pick)
+        act_pick_root = QAction("&Choose memory banks folder…", self)
+        act_pick_root.setShortcut("Ctrl+O")
+        act_pick_root.setStatusTip(
+            "Pick the parent folder that holds all your memory banks."
+        )
+        act_pick_root.triggered.connect(self._pick_memory_banks_root)
+        file_menu.addAction(act_pick_root)
+
+        act_refresh_banks = QAction("&Refresh bank list", self)
+        act_refresh_banks.setShortcut("F5")
+        act_refresh_banks.triggered.connect(self._populate_bank_combo)
+        file_menu.addAction(act_refresh_banks)
 
         file_menu.addSeparator()
         act_quit = QAction("&Quit", self)
@@ -331,25 +411,259 @@ class MainWindow(QMainWindow):
 
     # ── Memory bank loading ─────────────────────────────────────────────
 
-    def _try_initial_memory_bank(self) -> None:
-        """Load a memory bank on startup – settings first, then the default."""
-        if self.app_settings.memory_bank_dir:
-            path = Path(self.app_settings.memory_bank_dir)
-            if path.is_dir():
-                self._load_memory_bank(path)
+    def _try_initial_memory_banks_root(self) -> None:
+        """Resolve the memory-banks root on startup, migrating if needed.
+
+        Cascade (see ``docs/design/multi-memory-bank.md`` §"One-time
+        migration on first run after the upgrade"):
+
+        1. ``settings.memory_banks_root`` is set and exists → use it.
+        2. Default ``~/Supervertaler/memory-banks/`` already exists → use it.
+        3. Legacy ``~/Supervertaler/memory-bank/`` exists → show the
+           "name your existing bank" dialog, rename the folder into the
+           new layout, then use it.
+        4. First-time user → create ``~/Supervertaler/memory-banks/`` as
+           an empty root so the settings dialog has somewhere to point.
+
+        After the root is chosen the combo is populated and the
+        ``last_active_bank`` (if still valid) is selected.
+        """
+        root = self._resolve_memory_banks_root()
+        if root is None:
+            # Extremely defensive: resolution can only return None if the
+            # user explicitly cancelled the first-run migration dialog.
+            # In that case we simply show an empty combo and leave the
+            # user to pick a root from Settings.
+            self.memory_banks_root = None
+            self._populate_bank_combo()
+            return
+
+        self.memory_banks_root = root
+        self.app_settings.memory_banks_root = str(root)
+        save_settings(self.app_settings)
+
+        self._populate_bank_combo()
+        # _populate_bank_combo() auto-selects last_active_bank when it
+        # can; if it couldn't (empty root, stale last_active_bank), the
+        # user is left with an empty combo and no agents — same graceful
+        # fallback as a missing memory bank in the previous single-bank
+        # era.
+
+    def _resolve_memory_banks_root(self) -> Path | None:
+        """Decide which folder to use as the memory-banks root.
+
+        Returns the resolved path or ``None`` if the user declined the
+        first-run migration dialog.
+        """
+        # 1. Persisted value wins unconditionally (this is the
+        # steady-state path for every run after the first one).
+        persisted = self.app_settings.memory_banks_root
+        if persisted:
+            p = Path(persisted)
+            if p.is_dir():
+                return p
+
+        # 2. Default parent folder already exists.
+        if _DEFAULT_BANKS_ROOT.is_dir():
+            return _DEFAULT_BANKS_ROOT
+
+        # 3. Legacy single-bank layout → one-shot rename.
+        if _LEGACY_SINGLE_BANK.is_dir():
+            return self._migrate_legacy_single_bank()
+
+        # 4. First-time user: create an empty root so the settings
+        # dialog has a live folder to work with. We deliberately do not
+        # copy the bundled skeleton here — that belongs in the settings
+        # dialog's "Create new bank…" button (Step 3).
+        try:
+            _DEFAULT_BANKS_ROOT.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return _DEFAULT_BANKS_ROOT
+
+    def _migrate_legacy_single_bank(self) -> Path | None:
+        """Prompt the user to name their existing single-bank folder.
+
+        On OK, moves ``~/Supervertaler/memory-bank/`` →
+        ``~/Supervertaler/memory-banks/<name>/`` and persists
+        ``last_active_bank`` = ``<name>``. On cancel returns ``None``.
+        """
+        while True:
+            raw, ok = QInputDialog.getText(
+                self,
+                "Name your existing memory bank",
+                "Supervertaler now supports several memory banks side by side.\n"
+                f"\nFound an existing bank at:\n  {_LEGACY_SINGLE_BANK}\n\n"
+                "Give it a short name so it can join the new layout.\n"
+                "Use lowercase letters, digits, hyphens or underscores only.",
+                text="main",
+            )
+            if not ok:
+                return None
+
+            name = _sanitise_bank_name(raw)
+            if not name:
+                QMessageBox.warning(
+                    self,
+                    "Invalid name",
+                    "Please enter a short name using letters, digits, hyphens "
+                    "or underscores.",
+                )
+                continue
+
+            target_root = _DEFAULT_BANKS_ROOT
+            target = target_root / name
+            if target.exists():
+                QMessageBox.warning(
+                    self,
+                    "Name already taken",
+                    f"A folder named “{name}” already exists at:\n{target}\n\n"
+                    "Pick a different name.",
+                )
+                continue
+
+            try:
+                target_root.mkdir(parents=True, exist_ok=True)
+                _LEGACY_SINGLE_BANK.rename(target)
+            except OSError as exc:
+                QMessageBox.critical(
+                    self,
+                    "Could not move memory bank",
+                    f"Moving\n  {_LEGACY_SINGLE_BANK}\nto\n  {target}\n"
+                    f"failed:\n\n{exc}",
+                )
+                return None
+
+            # Persist the result immediately so a crash during the next
+            # few lines doesn't lose the migration.
+            self.app_settings.memory_banks_root = str(target_root)
+            self.app_settings.last_active_bank = name
+            self.app_settings.memory_bank_dir = str(target)
+            save_settings(self.app_settings)
+            return target_root
+
+    def _pick_memory_banks_root(self) -> None:
+        """File menu: let the user point at a different memory-banks root."""
+        start = self.app_settings.memory_banks_root or str(Path.home())
+        picked = QFileDialog.getExistingDirectory(
+            self, "Select memory banks folder (parent of all banks)", start
+        )
+        if not picked:
+            return
+
+        new_root = Path(picked)
+        self.memory_banks_root = new_root
+        self.app_settings.memory_banks_root = str(new_root)
+        # Clear the remembered bank — the new root probably won't have
+        # a bank with the same short name, and auto-selecting whatever
+        # happens to match would be surprising.
+        self.app_settings.last_active_bank = ""
+        self.app_settings.memory_bank_dir = ""
+        save_settings(self.app_settings)
+        self._populate_bank_combo()
+
+    def _populate_bank_combo(self) -> None:
+        """Repopulate the header dropdown from ``memory_banks_root``.
+
+        Tries to preserve the current selection across a refresh. If no
+        bank matches ``last_active_bank``, the first bank in the list is
+        auto-selected. If the root is empty, the combo shows a single
+        disabled "No memory banks" placeholder entry.
+        """
+        self._suppress_combo_change = True
+        try:
+            self.cmb_memory_bank.clear()
+
+            banks: list[MemoryBankInfo] = []
+            if self.memory_banks_root is not None:
+                banks = list_memory_banks(self.memory_banks_root)
+
+            if not banks:
+                self.cmb_memory_bank.addItem("(no memory banks)", userData=None)
+                # Still add "Manage banks…" so the user has a way out.
+                self.cmb_memory_bank.insertSeparator(1)
+                self.cmb_memory_bank.addItem("Manage banks…", userData=_MANAGE_SENTINEL)
+                self.cmb_memory_bank.setCurrentIndex(0)
+                self.btn_open_bank_folder.setEnabled(False)
+                self._unload_current_bank()
                 return
 
-        default = Path.home() / "Supervertaler" / "memory-bank"
-        if default.is_dir():
-            self._load_memory_bank(default)
+            preferred = self.app_settings.last_active_bank or ""
+            selected_row = 0
+            for row, info in enumerate(banks):
+                label = info.display_label or info.name
+                suffix = (
+                    f"  ·  {info.article_count} article"
+                    f"{'s' if info.article_count != 1 else ''}"
+                )
+                self.cmb_memory_bank.addItem(label + suffix, userData=str(info.path))
+                if info.name == preferred:
+                    selected_row = row
 
-    def _pick_memory_bank(self) -> None:
-        start = self.app_settings.memory_bank_dir or str(Path.home())
-        picked = QFileDialog.getExistingDirectory(
-            self, "Select memory bank folder", start
-        )
-        if picked:
-            self._load_memory_bank(Path(picked))
+            # Separator + "Manage banks…" at the bottom.
+            self.cmb_memory_bank.insertSeparator(self.cmb_memory_bank.count())
+            self.cmb_memory_bank.addItem("Manage banks…", userData=_MANAGE_SENTINEL)
+        finally:
+            self._suppress_combo_change = False
+
+        # Now actually trigger a load for the auto-picked row.
+        self.cmb_memory_bank.setCurrentIndex(selected_row)
+        self._on_bank_combo_changed(selected_row)
+
+    def _on_bank_combo_changed(self, index: int) -> None:
+        """Handle a selection change in the memory bank dropdown.
+
+        Three possibilities:
+        - ``_MANAGE_SENTINEL`` row → open Settings, restore previous selection.
+        - ``None`` userData (placeholder) → nothing to do.
+        - A real path → load that memory bank.
+        """
+        if self._suppress_combo_change:
+            return
+        if index < 0:
+            return
+
+        data = self.cmb_memory_bank.itemData(index)
+
+        if data == _MANAGE_SENTINEL:
+            # Restore the previous selection (or row 0) so the combo
+            # doesn't get stuck on "Manage banks…".
+            self._suppress_combo_change = True
+            try:
+                previous_row = max(0, index - 2)  # skip the separator
+                self.cmb_memory_bank.setCurrentIndex(previous_row)
+            finally:
+                self._suppress_combo_change = False
+            self._open_settings()
+            return
+
+        if not data:
+            return  # placeholder row
+
+        self._load_memory_bank(Path(data))
+
+    def _reveal_active_bank_folder(self) -> None:
+        """Open the active memory bank folder in the OS file manager."""
+        if self.memory_bank_dir is None or not self.memory_bank_dir.is_dir():
+            return
+        try:
+            from PyQt6.QtCore import QUrl
+            from PyQt6.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.memory_bank_dir)))
+        except Exception:  # noqa: BLE001 – best-effort, nothing to recover
+            pass
+
+    def _unload_current_bank(self) -> None:
+        """Drop the active bank: clear agents and update the inbox label."""
+        self.memory_bank_dir = None
+        self.llm_client = None
+        self.query_agent = None
+        self.compile_agent = None
+        self.lint_agent = None
+        self.distill_agent = None
+        self.session = None
+        self._refresh_inbox_count()
 
     def _load_memory_bank(self, path: Path) -> None:
         reader = MemoryBankReader(path)
@@ -363,9 +677,14 @@ class MainWindow(QMainWindow):
             return
 
         self.memory_bank_dir = path
-        self.lbl_memory_bank_path.setText(str(path))
-        self.lbl_memory_bank_path.setStyleSheet("color: #1e5a9e;")
+        self.btn_open_bank_folder.setEnabled(True)
 
+        # Persist the selection so the next launch reopens the same bank.
+        # memory_bank_dir is kept as a derived compat field – see
+        # settings.py for the rationale.
+        if self.memory_banks_root is not None:
+            self.app_settings.memory_banks_root = str(self.memory_banks_root)
+        self.app_settings.last_active_bank = path.name
         self.app_settings.memory_bank_dir = str(path)
         save_settings(self.app_settings)
 
@@ -413,27 +732,26 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.app_settings, self)
-        if dlg.exec():
-            self.app_settings = dlg.result_settings()
-            save_settings(self.app_settings)
-            self._refresh_status_bar()
+        if not dlg.exec():
+            return
 
-            # If the memory bank changed, reload from scratch; otherwise
-            # just rebuild the agents with the new LLM config.
-            if (
-                self.memory_bank_dir
-                and str(self.memory_bank_dir) != self.app_settings.memory_bank_dir
-            ):
-                new_mb = Path(self.app_settings.memory_bank_dir)
-                if new_mb.is_dir():
-                    self._load_memory_bank(new_mb)
-                else:
-                    self._rebuild_agents()
-            else:
-                self._rebuild_agents()
-                self._refresh_inbox_count()
+        self.app_settings = dlg.result_settings()
+        save_settings(self.app_settings)
+        self._refresh_status_bar()
 
-            self._append_system("Settings updated.")
+        # If the root changed, rescan and let _populate_bank_combo pick
+        # an appropriate selection. If only the LLM config changed, just
+        # rebuild the agents against the current bank.
+        new_root = self.app_settings.memory_banks_root
+        current_root = str(self.memory_banks_root) if self.memory_banks_root else ""
+        if new_root != current_root:
+            self.memory_banks_root = Path(new_root) if new_root else None
+            self._populate_bank_combo()
+        else:
+            self._rebuild_agents()
+            self._refresh_inbox_count()
+
+        self._append_system("Settings updated.")
 
     def _show_about(self) -> None:
         from .. import __version__
