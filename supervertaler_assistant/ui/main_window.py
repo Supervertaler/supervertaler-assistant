@@ -468,12 +468,17 @@ class MainWindow(QMainWindow):
         ``~/Supervertaler/memory-banks/<name>/`` and persists
         ``last_active_bank`` = ``<name>``. On cancel returns ``None``.
         """
+        # Example destination path using the native separator, so the user can
+        # see exactly where their renamed bank will land before they type a name.
+        example_destination = str(_DEFAULT_BANKS_ROOT / "<your-name>")
         while True:
             raw, ok = QInputDialog.getText(
                 self,
                 "Name your existing memory bank",
-                "Supervertaler now supports several memory banks side by side.\n"
-                f"\nFound an existing bank at:\n  {_LEGACY_SINGLE_BANK}\n\n"
+                "Supervertaler Assistant now supports several memory banks "
+                "side by side.\n"
+                f"\nFound an existing bank at:\n  {_LEGACY_SINGLE_BANK}\n"
+                f"\nIt will be moved to:\n  {example_destination}\n\n"
                 "Give it a short name so it can join the new layout.\n"
                 "Use lowercase letters, digits, hyphens or underscores only.",
                 text="main",
