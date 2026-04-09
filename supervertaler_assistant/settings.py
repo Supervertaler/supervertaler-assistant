@@ -2,7 +2,7 @@
 supervertaler_assistant.settings
 ================================
 
-Persisted app settings – memory bank path, LLM provider/model/key, UI state.
+Persisted app settings – memory bank paths, LLM provider/model/key, UI state.
 
 Settings live in a single JSON file at a cross-platform per-user path
 computed by ``platformdirs``:
@@ -23,9 +23,19 @@ Design notes
   prevent the app from starting. The user can always fix it from the
   Settings dialog.
 
-- **Backward-compat migration.** Older installs saved the memory bank
-  path under the key ``vault_dir``. On load we accept either name and
-  always write back the new one.
+- **Backward-compat migration chain.** Three generations of keys coexist:
+
+  1. ``vault_dir`` (earliest) – renamed to ``memory_bank_dir`` when the
+     product dropped the "SuperMemory" branding.
+  2. ``memory_bank_dir`` (single-bank era) – one fixed folder per user.
+  3. ``memory_banks_root`` + ``last_active_bank`` (multi-bank era) – a
+     parent folder that holds several banks and a short identifier naming
+     the currently active one. See ``docs/design/multi-memory-bank.md``.
+
+  ``load_settings()`` walks the chain so a really old install upgrades in
+  one hop. ``memory_bank_dir`` is still populated as a derived value for
+  now so existing callers keep working during the transition to the
+  dropdown UI.
 
 - The :class:`AppSettings` dataclass is serialisation-agnostic. JSON is
   the current storage format but nothing else in the codebase depends on
@@ -56,7 +66,20 @@ APP_AUTHOR = "Supervertaler"
 class AppSettings:
     """Everything the app needs to remember between runs."""
 
-    # Memory bank
+    # Memory bank – multi-bank era:
+    #   memory_banks_root  = parent folder that holds every bank
+    #                        (e.g. ~/Supervertaler/memory-banks/)
+    #   last_active_bank   = short identifier of the currently selected bank
+    #                        (e.g. "translation"), persisted so the next
+    #                        launch reopens the same bank.
+    #   memory_bank_dir    = derived convenience path equal to
+    #                        <memory_banks_root>/<last_active_bank>, kept as
+    #                        a real field so existing single-bank callers
+    #                        keep working during the UI transition. Step 2
+    #                        of the multi-bank rollout removes the last
+    #                        callers and this field retires.
+    memory_banks_root: str = ""
+    last_active_bank: str = ""
     memory_bank_dir: str = ""
 
     # LLM (flattened from LlmSettings for easier JSON round-tripping)
@@ -145,11 +168,7 @@ def load_settings() -> AppSettings:
     if not isinstance(raw, dict):
         return AppSettings()
 
-    # Backward-compat: accept the old ``vault_dir`` key and remap it.
-    if "vault_dir" in raw and "memory_bank_dir" not in raw:
-        raw["memory_bank_dir"] = raw.pop("vault_dir")
-    else:
-        raw.pop("vault_dir", None)
+    _migrate_legacy_keys(raw)
 
     # Split known fields from unknowns for forward-compat round-tripping.
     known = {f for f in AppSettings.__dataclass_fields__ if not f.startswith("_")}
@@ -164,6 +183,48 @@ def load_settings() -> AppSettings:
 
     settings._extra = extra
     return settings
+
+
+def _migrate_legacy_keys(raw: dict) -> None:
+    """In-place rewrite of a raw JSON settings blob to the current schema.
+
+    Walks the full migration chain so a really old install upgrades in one
+    hop:
+
+    1. ``vault_dir`` → ``memory_bank_dir`` (drop the retired "vault" name).
+    2. ``memory_bank_dir`` → ``memory_banks_root`` + ``last_active_bank``
+       (split the single path into parent + short identifier, preparing
+       for the multi-bank dropdown).
+    3. Reconcile: if the multi-bank keys are present, always recompute
+       ``memory_bank_dir`` from them so legacy callers that still read
+       that field see a value consistent with the dropdown.
+    """
+    # 1. vault_dir → memory_bank_dir
+    if "vault_dir" in raw and "memory_bank_dir" not in raw:
+        raw["memory_bank_dir"] = raw.pop("vault_dir")
+    else:
+        raw.pop("vault_dir", None)
+
+    # 2. memory_bank_dir → memory_banks_root + last_active_bank
+    legacy_dir = raw.get("memory_bank_dir") or ""
+    if legacy_dir and not raw.get("memory_banks_root"):
+        try:
+            old = Path(str(legacy_dir))
+            if old.name:
+                raw["memory_banks_root"] = str(old.parent)
+                raw["last_active_bank"] = old.name
+        except (TypeError, ValueError):
+            # Silently skip – corrupted path string, fall through to defaults.
+            pass
+
+    # 3. Reconcile multi-bank keys into memory_bank_dir for legacy callers.
+    root = str(raw.get("memory_banks_root") or "")
+    name = str(raw.get("last_active_bank") or "")
+    if root and name:
+        try:
+            raw["memory_bank_dir"] = str(Path(root) / name)
+        except (TypeError, ValueError):
+            pass
 
 
 def save_settings(settings: AppSettings) -> None:

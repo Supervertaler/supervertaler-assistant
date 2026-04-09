@@ -615,10 +615,125 @@ def iter_articles(memory_bank_dir: str | Path) -> Iterable[ArticleIndex]:
     return list(reader._index or [])
 
 
+# ─── Multi-bank support ────────────────────────────────────────────────────
+
+
+@dataclass
+class MemoryBankInfo:
+    """Lightweight descriptor of one memory bank sitting under a shared root.
+
+    Used by the UI to populate the memory-bank dropdown without having to
+    instantiate a full :class:`MemoryBankReader` for every bank.
+    """
+
+    name: str
+    """Short folder identifier, e.g. ``"translation"`` or ``"general"``."""
+
+    path: Path
+    """Absolute path to the bank's root folder."""
+
+    display_label: str | None = None
+    """Optional pretty label for the UI. ``None`` means "use ``name``".
+
+    Populated from the bank's ``05_INDICES/Master Index.md`` frontmatter in
+    a later step; for now always ``None``.
+    """
+
+    article_count: int = 0
+    """Number of knowledge articles across ``CONTENT_FOLDERS``.
+
+    Counts ``.md`` files that are not ``_EXAMPLE_*`` and not inside an
+    ``_archive/`` subtree. Frontmatter is not parsed – this is a fast file
+    walk.
+    """
+
+
+def _count_articles(bank_dir: Path) -> int:
+    """Cheap count of real articles in a bank (no frontmatter parsing)."""
+    count = 0
+    for folder in CONTENT_FOLDERS:
+        d = bank_dir / folder
+        if not d.is_dir():
+            continue
+        for md in d.rglob("*.md"):
+            name_lower = md.name.lower()
+            if name_lower.startswith(_EXAMPLE_PREFIX):
+                continue
+            if _ARCHIVE_SEGMENT in (p.lower() for p in md.parts):
+                continue
+            count += 1
+    return count
+
+
+def _looks_like_memory_bank(path: Path) -> bool:
+    """True if ``path`` has at least one of the canonical content folders.
+
+    This is the same "exists" rule :class:`MemoryBankReader` uses, so the
+    dropdown only shows folders the reader would actually be able to open.
+    """
+    if not path.is_dir():
+        return False
+    return any((path / cf).is_dir() for cf in CONTENT_FOLDERS)
+
+
+def list_memory_banks(memory_banks_root: str | Path) -> list[MemoryBankInfo]:
+    """Return every memory bank directly under ``memory_banks_root``.
+
+    Scans one level deep and skips:
+    - non-directories
+    - dot-folders (``.obsidian``, ``.git``, …)
+    - folders that don't contain at least one ``CONTENT_FOLDERS`` entry
+
+    Results are sorted alphabetically by folder name. If ``memory_banks_root``
+    is empty, does not exist, or is not a directory, returns an empty list
+    (never raises) – the UI treats that as "no banks yet".
+    """
+    # Guard against empty/None input explicitly: ``Path("")`` silently
+    # resolves to the current working directory on every platform, which
+    # would make an unconfigured install start scanning wherever the app
+    # happened to be launched from.
+    if not memory_banks_root:
+        return []
+
+    try:
+        root = Path(memory_banks_root)
+    except (TypeError, ValueError):
+        return []
+
+    if not root.is_dir():
+        return []
+
+    banks: list[MemoryBankInfo] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return []
+
+    for child in children:
+        if not child.is_dir():
+            continue
+        if child.name.startswith("."):
+            continue
+        if not _looks_like_memory_bank(child):
+            continue
+        banks.append(
+            MemoryBankInfo(
+                name=child.name,
+                path=child.resolve(),
+                display_label=None,
+                article_count=_count_articles(child),
+            )
+        )
+
+    return banks
+
+
 __all__ = [
     "CONTENT_FOLDERS",
     "ArticleIndex",
     "MemoryBankContext",
+    "MemoryBankInfo",
     "MemoryBankReader",
     "iter_articles",
+    "list_memory_banks",
 ]
