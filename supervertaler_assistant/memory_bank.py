@@ -52,9 +52,57 @@ CONTENT_FOLDERS: tuple[str, ...] = (
 """Folders scanned for memory-bank articles. 00_INBOX, 05_INDICES, 06_TEMPLATES
 are skipped – they are workflow folders, not knowledge."""
 
+SKELETON_FOLDERS: tuple[str, ...] = (
+    "00_INBOX",
+    "01_CLIENTS",
+    "02_TERMINOLOGY",
+    "03_DOMAINS",
+    "04_STYLE",
+    "05_INDICES",
+    "06_TEMPLATES",
+)
+"""Full spec-standard folder list for a freshly created memory bank.
+
+Used by the settings dialog's "Create new bank…" button. Includes the
+workflow folders (``00_INBOX``, ``05_INDICES``, ``06_TEMPLATES``) as
+well as the four knowledge folders in :data:`CONTENT_FOLDERS`, so a
+new bank is immediately usable by every agent (Process Inbox, Health
+Check, Distill, Query) without extra setup.
+"""
+
+# Characters allowed in a memory bank folder name. Kept narrow on
+# purpose: the design note mandates kebab-case / single lowercase words.
+_BANK_NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+
 _EXAMPLE_PREFIX = "_example_"
 _ARCHIVE_SEGMENT = "_archive"
 _INDEX_TTL_SECONDS = 30  # re-scan at most every 30s unless forced
+
+
+def sanitise_bank_name(raw: str) -> str:
+    """Normalise a user-entered memory bank name into a safe identifier.
+
+    Spec (see ``docs/design/multi-memory-bank.md`` §"Design decisions"):
+    bank folder names are short identifiers, not display labels. Use
+    kebab-case or single lowercase words. Spaces become hyphens,
+    uppercase collapses to lowercase, and any character outside the
+    ``[a-z0-9-_]`` set is dropped. Leading and trailing separators are
+    stripped.
+
+    Returns an empty string if nothing survives sanitisation – the
+    caller should treat that as a validation error and ask again.
+
+    Examples:
+        "Main"           → "main"
+        "My Translation" → "my-translation"
+        "eu procurement" → "eu-procurement"
+        "foo!?bar"       → "foobar"
+        "   "            → ""
+        "--main--"       → "main"
+    """
+    lowered = raw.strip().lower().replace(" ", "-")
+    cleaned = "".join(c for c in lowered if c in _BANK_NAME_CHARS)
+    return cleaned.strip("-_")
 
 # Crude tokens-per-char estimate. Matches the C# reader for consistency.
 _CHARS_PER_TOKEN = 4
@@ -730,10 +778,12 @@ def list_memory_banks(memory_banks_root: str | Path) -> list[MemoryBankInfo]:
 
 __all__ = [
     "CONTENT_FOLDERS",
+    "SKELETON_FOLDERS",
     "ArticleIndex",
     "MemoryBankContext",
     "MemoryBankInfo",
     "MemoryBankReader",
     "iter_articles",
     "list_memory_banks",
+    "sanitise_bank_name",
 ]

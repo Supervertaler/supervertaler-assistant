@@ -74,7 +74,12 @@ from ..agents import (
     QueryAgent,
 )
 from ..llm import LlmClient, validate_settings
-from ..memory_bank import MemoryBankInfo, MemoryBankReader, list_memory_banks
+from ..memory_bank import (
+    MemoryBankInfo,
+    MemoryBankReader,
+    list_memory_banks,
+    sanitise_bank_name,
+)
 from ..settings import AppSettings, load_settings, save_settings
 from .settings_dialog import SettingsDialog
 
@@ -89,31 +94,6 @@ _DEFAULT_BANKS_ROOT = Path.home() / "Supervertaler" / "memory-banks"
 
 # Legacy single-bank path to migrate on first run if we find it.
 _LEGACY_SINGLE_BANK = Path.home() / "Supervertaler" / "memory-bank"
-
-# Regex that accepts short-identifier bank names: lowercase letters,
-# digits, hyphen, underscore. Applied to the first-run migration name
-# the user supplies so a nice "Main" becomes "main".
-_BANK_NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-_"
-
-
-def _sanitise_bank_name(raw: str) -> str:
-    """Normalise a user-entered bank name into a short filesystem identifier.
-
-    Spec: lowercase letters, digits, hyphen, underscore. Spaces become
-    hyphens. Anything else is dropped. Leading / trailing separators are
-    stripped. Returns an empty string if nothing survives sanitisation,
-    which the caller should treat as a validation error.
-
-    Examples:
-        "Main"           → "main"
-        "My Translation" → "my-translation"
-        "eu procurement" → "eu-procurement"
-        "foo!?bar"       → "foobar"
-        "   "            → ""
-    """
-    lowered = raw.strip().lower().replace(" ", "-")
-    cleaned = "".join(c for c in lowered if c in _BANK_NAME_CHARS)
-    return cleaned.strip("-_")
 
 
 # ─── Chat rendering helpers ────────────────────────────────────────────────
@@ -501,7 +481,7 @@ class MainWindow(QMainWindow):
             if not ok:
                 return None
 
-            name = _sanitise_bank_name(raw)
+            name = sanitise_bank_name(raw)
             if not name:
                 QMessageBox.warning(
                     self,
@@ -739,17 +719,15 @@ class MainWindow(QMainWindow):
         save_settings(self.app_settings)
         self._refresh_status_bar()
 
-        # If the root changed, rescan and let _populate_bank_combo pick
-        # an appropriate selection. If only the LLM config changed, just
-        # rebuild the agents against the current bank.
+        # Always repopulate: the settings dialog's bank-management
+        # buttons (create / rename / delete) operate live on the file
+        # system, so even if ``memory_banks_root`` itself is unchanged
+        # the set of banks under it may have. _populate_bank_combo will
+        # preserve the current selection if it still exists, or pick a
+        # sensible fallback.
         new_root = self.app_settings.memory_banks_root
-        current_root = str(self.memory_banks_root) if self.memory_banks_root else ""
-        if new_root != current_root:
-            self.memory_banks_root = Path(new_root) if new_root else None
-            self._populate_bank_combo()
-        else:
-            self._rebuild_agents()
-            self._refresh_inbox_count()
+        self.memory_banks_root = Path(new_root) if new_root else None
+        self._populate_bank_combo()
 
         self._append_system("Settings updated.")
 
